@@ -1,7 +1,6 @@
-const { getStore } = require("@netlify/blobs");
+const { getStore, connectLambda } = require("@netlify/blobs");
 const Busboy = require("busboy");
 const crypto = require("crypto");
-
 const STORE_NAME = "studyshare-materials";
 const INDEX_KEY = "materials.json";
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
@@ -973,67 +972,68 @@ function handleOptions() {
 // =====================================================
 // NETLIFY HANDLER
 // =====================================================
+exports.handler = async(event) => {
+    connectLambda(event);
 
-exports.handler =
-    async function(event) {
-        try {
-            const method =
-                String(
-                    event.httpMethod ||
-                    "GET"
-                ).toUpperCase();
-
-            // OPTIONS
-            if (
-                method ===
-                "OPTIONS"
-            ) {
-                return handleOptions();
-            }
-
-            // GET
-            if (
-                method ===
+    // rest of your existing code...
+    try {
+        const method =
+            String(
+                event.httpMethod ||
                 "GET"
-            ) {
-                return await handleGet(
-                    event
-                );
-            }
+            ).toUpperCase();
 
-            // POST
-            if (
-                method ===
-                "POST"
-            ) {
-                return await handleUpload(
-                    event
-                );
-            }
-
-            // DELETE
-            if (
-                method ===
-                "DELETE"
-            ) {
-                return await handleDelete(
-                    event
-                );
-            }
-
-            // OTHER
-            return json(405, {
-                error: "Method not allowed."
-            });
-        } catch (error) {
-            console.error(
-                "StudyShare API error:",
-                error
-            );
-
-            return json(500, {
-                error: error.message ||
-                    "Server error."
-            });
+        // OPTIONS
+        if (
+            method ===
+            "OPTIONS"
+        ) {
+            return handleOptions();
         }
-    };
+
+        // GET
+        if (
+            method ===
+            "GET"
+        ) {
+            return await handleGet(
+                event
+            );
+        }
+
+        // POST
+        if (
+            method ===
+            "POST"
+        ) {
+            return await handleUpload(
+                event
+            );
+        }
+
+        // DELETE
+        if (
+            method ===
+            "DELETE"
+        ) {
+            return await handleDelete(
+                event
+            );
+        }
+
+        // OTHER
+        return json(405, {
+            error: "Method not allowed."
+        });
+    } catch (error) {
+        console.error(
+            "StudyShare API error:",
+            error
+        );
+
+        return json(500, {
+            error: error.message ||
+                "Server error."
+        });
+    }
+};
