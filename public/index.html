@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StudyShare ☁️</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div><h1>StudyShare ☁️</h1><p>Simple notes & videos for your studies</p></div>
+  <button id="adminBtn" class="outline-btn">Admin</button>
+</header>
+<main class="container">
+  <section class="hero">
+    <span class="pill">📚 Cloud Computing</span>
+    <h2>Study whenever you want.</h2>
+    <p>Handwritten notes, questions, PDFs and short course videos — all in one simple place.</p>
+  </section>
+  <section class="filters">
+    <input id="search" type="search" placeholder="Search notes, questions, cloud...">
+    <select id="category">
+      <option value="all">All materials</option>
+      <option>Cloud Computing</option><option>Questions</option><option>Important</option><option>Other</option>
+    </select>
+  </section>
+  <section id="materials" class="grid"><div class="loading">Loading study material...</div></section>
+</main>
+
+<div id="adminModal" class="modal hidden">
+ <div class="modal-card">
+  <button class="close" id="closeAdmin">×</button>
+  <h2>Admin Upload</h2>
+  <p class="muted">Only you need this password to add or delete study material.</p>
+  <form id="uploadForm">
+   <label>Admin password</label><input id="password" type="password" required>
+   <label>Title</label><input name="title" required placeholder="Cloud Computing Unit 1 Notes">
+   <label>Description</label><textarea name="description" placeholder="Important notes for Unit 1"></textarea>
+   <label>Category</label>
+   <select name="category"><option>Cloud Computing</option><option>Questions</option><option>Important</option><option>Other</option></select>
+   <label>File</label><input name="file" type="file" accept="image/*,.pdf,video/*" required>
+   <small>For this Netlify version, keep each file under 5 MB.</small>
+   <button class="primary-btn" type="submit">Upload Material 🚀</button>
+   <p id="uploadStatus"></p>
+  </form>
+ </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
