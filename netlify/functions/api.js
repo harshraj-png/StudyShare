@@ -1,18 +1,25 @@
 const { getStore } = require("@netlify/blobs");
 const Busboy = require("busboy");
+const crypto = require("crypto");
 
 const STORE_NAME = "studyshare-materials";
 const INDEX_KEY = "materials.json";
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
-// Netlify Blobs store
+// =====================================================
+// NETLIFY BLOBS
+// =====================================================
+
 function getStudyStore() {
     return getStore({
         name: STORE_NAME
     });
 }
 
-// JSON response helper
+// =====================================================
+// JSON RESPONSE
+// =====================================================
+
 function json(statusCode, data) {
     return {
         statusCode: statusCode,
@@ -27,7 +34,33 @@ function json(statusCode, data) {
     };
 }
 
-// Check admin password
+// =====================================================
+// FILE RESPONSE
+// =====================================================
+
+function fileResponse(statusCode, contentType, body, filename) {
+    return {
+        statusCode: statusCode,
+        isBase64Encoded: true,
+        headers: {
+            "Content-Type": contentType || "application/octet-stream",
+
+            "Cache-Control": "public, max-age=31536000",
+
+            "Access-Control-Allow-Origin": "*",
+
+            "Content-Disposition": 'inline; filename="' +
+                safeFileName(filename || "file") +
+                '"'
+        },
+        body: body
+    };
+}
+
+// =====================================================
+// ADMIN PASSWORD
+// =====================================================
+
 function checkPassword(event) {
     const expectedPassword =
         process.env.ADMIN_PASSWORD;
@@ -43,16 +76,30 @@ function checkPassword(event) {
 
     const headers = event.headers || {};
 
-    const suppliedPassword =
-        headers["x-admin-password"] ||
-        headers["X-Admin-Password"] ||
-        "";
+    let suppliedPassword = "";
+
+    if (headers["x-admin-password"]) {
+        suppliedPassword =
+            headers["x-admin-password"];
+    } else if (headers["X-Admin-Password"]) {
+        suppliedPassword =
+            headers["X-Admin-Password"];
+    }
+
+    if (!suppliedPassword) {
+        return {
+            ok: false,
+            response: json(401, {
+                error: "Admin password is required."
+            })
+        };
+    }
 
     if (suppliedPassword !== expectedPassword) {
         return {
             ok: false,
-            response: json(401, {
-                error: "Wrong admin password."
+            response: json(403, {
+                error: "Invalid admin password."
             })
         };
     }
@@ -62,8 +109,11 @@ function checkPassword(event) {
     };
 }
 
-// Get saved materials
-async function getMaterials() {
+// =====================================================
+// READ MATERIAL INDEX
+// =====================================================
+
+async function readIndex() {
     const store = getStudyStore();
 
     try {
@@ -73,23 +123,29 @@ async function getMaterials() {
             }
         );
 
-        if (!Array.isArray(data)) {
+        if (!data) {
             return [];
         }
 
-        return data;
+        if (Array.isArray(data)) {
+            return data;
+        }
+
+        return [];
     } catch (error) {
-        console.error(
-            "Error reading materials:",
-            error
+        console.log(
+            "No materials index found. Creating a new one."
         );
 
         return [];
     }
 }
 
-// Save materials
-async function saveMaterials(materials) {
+// =====================================================
+// SAVE MATERIAL INDEX
+// =====================================================
+
+async function saveIndex(materials) {
     const store = getStudyStore();
 
     await store.setJSON(
@@ -98,580 +154,886 @@ async function saveMaterials(materials) {
     );
 }
 
-// Clean file name
-function cleanFileName(filename) {
-    return String(filename || "file")
-        .replace(/[^a-zA-Z0-9._-]/g, "_")
-        .slice(0, 150);
+// =====================================================
+// SAFE FILE NAME
+// =====================================================
+
+function safeFileName(filename) {
+    if (!filename) {
+        return "file";
+    }
+
+    return filename
+        .replace(
+            /[^a-zA-Z0-9._-]/g,
+            "_"
+        )
+        .replace(
+            /_+/g,
+            "_"
+        )
+        .substring(0, 150);
 }
 
-// Parse multipart form
+// =====================================================
+// FILE EXTENSION
+// =====================================================
+
+function getExtension(filename) {
+    if (!filename) {
+        return "";
+    }
+
+    const parts =
+        filename.split(".");
+
+    if (parts.length < 2) {
+        return "";
+    }
+
+    return parts[
+            parts.length - 1
+        ]
+        .toLowerCase()
+        .replace(
+            /[^a-z0-9]/g,
+            ""
+        );
+}
+
+// =====================================================
+// UNIQUE ID
+// =====================================================
+
+function createId() {
+    return (
+        Date.now().toString(36) +
+        "-" +
+        crypto
+        .randomBytes(8)
+        .toString("hex")
+    );
+}
+
+// =====================================================
+// MULTIPART PARSER
+// =====================================================
+
 function parseMultipart(event) {
-    return new Promise(function(resolve, reject) {
+    return new Promise(
+        function(resolve, reject) {
+            try {
+                const headers =
+                    event.headers || {};
 
-        const headers = event.headers || {};
+                let contentType = "";
 
-        const contentType =
-            headers["content-type"] ||
-            headers["Content-Type"] ||
-            "";
+                if (headers["content-type"]) {
+                    contentType =
+                        headers["content-type"];
+                } else if (
+                    headers["Content-Type"]
+                ) {
+                    contentType =
+                        headers["Content-Type"];
+                }
 
-        if (
-            contentType.indexOf("multipart/form-data") === -1
-        ) {
-            reject(
-                new Error(
-                    "Please upload using the website form."
-                )
-            );
-            return;
-        }
-
-        const busboy = Busboy({
-            headers: {
-                "content-type": contentType
-            },
-            limits: {
-                fileSize: MAX_FILE_SIZE
-            }
-        });
-
-        const fields = {};
-        let uploadedFile = null;
-        let fileTooLarge = false;
-
-        busboy.on(
-            "field",
-            function(name, value) {
-                fields[name] = value;
-            }
-        );
-
-        busboy.on(
-            "file",
-            function(fieldname, file, info) {
-
-                const chunks = [];
-                let totalSize = 0;
-
-                file.on(
-                    "data",
-                    function(chunk) {
-
-                        totalSize += chunk.length;
-
-                        if (
-                            totalSize > MAX_FILE_SIZE
-                        ) {
-                            fileTooLarge = true;
-                            file.resume();
-                            return;
-                        }
-
-                        chunks.push(chunk);
-                    }
-                );
-
-                file.on(
-                    "limit",
-                    function() {
-                        fileTooLarge = true;
-                    }
-                );
-
-                file.on(
-                    "end",
-                    function() {
-
-                        if (!fileTooLarge) {
-                            uploadedFile = {
-                                fieldname: fieldname,
-                                filename: info.filename,
-                                mimeType: info.mimeType,
-                                buffer: Buffer.concat(chunks)
-                            };
-                        }
-                    }
-                );
-            }
-        );
-
-        busboy.on(
-            "error",
-            function(error) {
-                reject(error);
-            }
-        );
-
-        busboy.on(
-            "finish",
-            function() {
-
-                if (fileTooLarge) {
+                if (!contentType
+                    .toLowerCase()
+                    .includes(
+                        "multipart/form-data"
+                    )
+                ) {
                     reject(
                         new Error(
-                            "File is too large. Maximum size is 5 MB."
+                            "Request must be multipart/form-data."
                         )
                     );
 
                     return;
                 }
 
-                resolve({
-                    fields: fields,
-                    file: uploadedFile
+                const busboy =
+                    Busboy({
+                        headers: {
+                            "content-type": contentType
+                        },
+
+                        limits: {
+                            fileSize: MAX_FILE_SIZE,
+
+                            files: 1
+                        }
+                    });
+
+                const fields = {};
+
+                let uploadedFile = null;
+
+                let fileTooLarge = false;
+
+                const chunks = [];
+
+                busboy.on(
+                    "field",
+                    function(
+                        name,
+                        value
+                    ) {
+                        fields[name] = value;
+                    }
+                );
+
+                busboy.on(
+                    "file",
+                    function(
+                        fieldname,
+                        stream,
+                        info
+                    ) {
+                        const filename =
+                            info.filename;
+
+                        const encoding =
+                            info.encoding;
+
+                        const mimeType =
+                            info.mimeType;
+
+                        let totalSize = 0;
+
+                        stream.on(
+                            "data",
+                            function(chunk) {
+                                totalSize +=
+                                    chunk.length;
+
+                                if (
+                                    totalSize <=
+                                    MAX_FILE_SIZE
+                                ) {
+                                    chunks.push(
+                                        chunk
+                                    );
+                                }
+                            }
+                        );
+
+                        stream.on(
+                            "limit",
+                            function() {
+                                fileTooLarge =
+                                    true;
+                            }
+                        );
+
+                        stream.on(
+                            "end",
+                            function() {
+                                uploadedFile = {
+                                    fieldname: fieldname,
+
+                                    filename: filename,
+
+                                    encoding: encoding,
+
+                                    mimeType: mimeType,
+
+                                    size: totalSize,
+
+                                    buffer: Buffer.concat(
+                                        chunks
+                                    )
+                                };
+                            }
+                        );
+                    }
+                );
+
+                busboy.on(
+                    "finish",
+                    function() {
+                        if (fileTooLarge) {
+                            reject(
+                                new Error(
+                                    "File is too large. Maximum size is 5 MB."
+                                )
+                            );
+
+                            return;
+                        }
+
+                        resolve({
+                            fields: fields,
+
+                            file: uploadedFile
+                        });
+                    }
+                );
+
+                busboy.on(
+                    "error",
+                    function(error) {
+                        reject(error);
+                    }
+                );
+
+                let body =
+                    event.body || "";
+
+                if (
+                    event.isBase64Encoded
+                ) {
+                    body =
+                        Buffer.from(
+                            body,
+                            "base64"
+                        );
+                } else {
+                    body =
+                        Buffer.from(
+                            body,
+                            "binary"
+                        );
+                }
+
+                busboy.end(body);
+            } catch (error) {
+                reject(error);
+            }
+        }
+    );
+}
+
+// =====================================================
+// GET MATERIALS / GET FILE
+// =====================================================
+
+async function handleGet(event) {
+    const query =
+        event.queryStringParameters || {};
+
+    // ---------------------------------------------------
+    // GET SINGLE FILE
+    // ---------------------------------------------------
+
+    if (query.file) {
+        const store =
+            getStudyStore();
+
+        const blobKey =
+            query.file;
+
+        try {
+            const arrayBuffer =
+                await store.get(
+                    blobKey, {
+                        type: "arrayBuffer"
+                    }
+                );
+
+            if (!arrayBuffer) {
+                return json(404, {
+                    error: "File not found."
                 });
+            }
+
+            const materials =
+                await readIndex();
+
+            let material = null;
+
+            for (
+                let i = 0; i < materials.length; i++
+            ) {
+                if (
+                    materials[i]
+                    .blobKey ===
+                    blobKey
+                ) {
+                    material =
+                        materials[i];
+
+                    break;
+                }
+            }
+
+            let contentType =
+                "application/octet-stream";
+
+            let filename =
+                "study-material";
+
+            if (material) {
+                if (material.mimeType) {
+                    contentType =
+                        material.mimeType;
+                }
+
+                if (material.fileName) {
+                    filename =
+                        material.fileName;
+                }
+            }
+
+            const buffer =
+                Buffer.from(
+                    arrayBuffer
+                );
+
+            return fileResponse(
+                200,
+                contentType,
+                buffer.toString(
+                    "base64"
+                ),
+                filename
+            );
+        } catch (error) {
+            console.error(
+                "File retrieval error:",
+                error
+            );
+
+            return json(500, {
+                error: "Unable to retrieve file.",
+
+                message: error.message
+            });
+        }
+    }
+
+    // ---------------------------------------------------
+    // GET ALL MATERIALS
+    // ---------------------------------------------------
+
+    try {
+        let materials =
+            await readIndex();
+
+        const search =
+            typeof query.search ===
+            "string" ?
+            query.search
+            .trim()
+            .toLowerCase() :
+            "";
+
+        const category =
+            typeof query.category ===
+            "string" ?
+            query.category
+            .trim()
+            .toLowerCase() :
+            "";
+
+        if (search) {
+            materials =
+                materials.filter(
+                    function(item) {
+                        const title =
+                            String(
+                                item.title || ""
+                            ).toLowerCase();
+
+                        const description =
+                            String(
+                                item.description ||
+                                ""
+                            ).toLowerCase();
+
+                        const itemCategory =
+                            String(
+                                item.category || ""
+                            ).toLowerCase();
+
+                        return (
+                            title.includes(
+                                search
+                            ) ||
+                            description.includes(
+                                search
+                            ) ||
+                            itemCategory.includes(
+                                search
+                            )
+                        );
+                    }
+                );
+        }
+
+        if (
+            category &&
+            category !== "all"
+        ) {
+            materials =
+                materials.filter(
+                    function(item) {
+                        return (
+                            String(
+                                item.category ||
+                                ""
+                            ).toLowerCase() ===
+                            category
+                        );
+                    }
+                );
+        }
+
+        materials.sort(
+            function(a, b) {
+                return (
+                    new Date(
+                        b.createdAt || 0
+                    ) -
+                    new Date(
+                        a.createdAt || 0
+                    )
+                );
             }
         );
 
-        try {
-
-            const rawBody =
-                event.body || "";
-
-            let bodyBuffer;
-
-            if (
-                event.isBase64Encoded
-            ) {
-                bodyBuffer =
-                    Buffer.from(
-                        rawBody,
-                        "base64"
-                    );
-            } else {
-                bodyBuffer =
-                    Buffer.from(
-                        rawBody,
-                        "utf8"
-                    );
-            }
-
-            busboy.end(bodyBuffer);
-
-        } catch (error) {
-            reject(error);
-        }
-    });
-}
-
-// Get material ID from URL
-function getMaterialId(event) {
-
-    const path =
-        event.path || "";
-
-    const parts =
-        path.split("/")
-        .filter(Boolean);
-
-    if (parts.length === 0) {
-        return null;
-    }
-
-    const lastPart =
-        parts[parts.length - 1];
-
-    if (
-        lastPart === "api" ||
-        lastPart === "api.js" ||
-        lastPart === "functions"
-    ) {
-        return null;
-    }
-
-    return lastPart;
-}
-
-// Main Netlify function
-exports.handler = async function(event) {
-
-    try {
-
-        const method =
-            event.httpMethod || "GET";
-
-        /*
-         * OPTIONS
-         */
-        if (method === "OPTIONS") {
-
-            return {
-                statusCode: 204,
-
-                headers: {
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "Content-Type, X-Admin-Password",
-                    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS"
-                },
-
-                body: ""
-            };
-        }
-
-        /*
-         * GET
-         *
-         * /api
-         *
-         * Returns all study materials.
-         */
-        if (method === "GET") {
-
-            const materialId =
-                getMaterialId(event);
-
-            /*
-             * Download/view a file
-             *
-             * /api/:id
-             */
-            if (materialId) {
-
-                const materials =
-                    await getMaterials();
-
-                const material =
-                    materials.find(
-                        function(item) {
-                            return item.id === materialId;
-                        }
-                    );
-
-                if (!material) {
-
-                    return json(404, {
-                        error: "Material not found."
-                    });
-                }
-
-                if (!material.blobKey) {
-
-                    return json(404, {
-                        error: "File not found."
-                    });
-                }
-
-                const store =
-                    getStudyStore();
-
-                const file =
-                    await store.get(
-                        material.blobKey, {
-                            type: "arrayBuffer"
-                        }
-                    );
-
-                if (!file) {
-
-                    return json(404, {
-                        error: "Uploaded file not found."
-                    });
-                }
-
-                const buffer =
-                    Buffer.from(file);
-
-                return {
-                    statusCode: 200,
-
-                    headers: {
-                        "Content-Type": material.mimeType ||
-                            "application/octet-stream",
-
-                        "Content-Disposition": 'inline; filename="' +
-                            cleanFileName(
-                                material.originalName
-                            ) +
-                            '"',
-
-                        "Cache-Control": "public, max-age=3600",
-
-                        "Access-Control-Allow-Origin": "*"
-                    },
-
-                    isBase64Encoded: true,
-
-                    body: buffer.toString("base64")
-                };
-            }
-
-            /*
-             * Return materials list
-             */
-            const materials =
-                await getMaterials();
-
-            materials.sort(
-                function(a, b) {
-
-                    return (
-                        new Date(b.createdAt).getTime() -
-                        new Date(a.createdAt).getTime()
-                    );
-
-                }
-            );
-
-            return json(
-                200,
-                materials
-            );
-        }
-
-        /*
-         * POST
-         *
-         * Upload material
-         */
-        if (method === "POST") {
-
-            const auth =
-                checkPassword(event);
-
-            if (!auth.ok) {
-                return auth.response;
-            }
-
-            const parsed =
-                await parseMultipart(event);
-
-            const fields =
-                parsed.fields;
-
-            const file =
-                parsed.file;
-
-            if (!file ||
-                !file.buffer ||
-                file.buffer.length === 0
-            ) {
-
-                return json(400, {
-                    error: "Please choose a file."
-                });
-            }
-
-            const safeName =
-                cleanFileName(
-                    file.filename
-                );
-
-            const id =
-                Date.now().toString() +
-                "-" +
-                Math.random()
-                .toString(36)
-                .substring(2, 8);
-
-            const blobKey =
-                "files/" +
-                id +
-                "-" +
-                safeName;
-
-            const store =
-                getStudyStore();
-
-            /*
-             * Save actual file
-             */
-            await store.set(
-                blobKey,
-                file.buffer, {
-                    metadata: {
-                        contentType: file.mimeType ||
-                            "application/octet-stream"
-                    }
-                }
-            );
-
-            let materials =
-                await getMaterials();
-
-            /*
-             * Detect file type
-             */
-            let type = "file";
-
-            if (
-                file.mimeType ===
-                "application/pdf"
-            ) {
-                type = "pdf";
-            } else if (
-                file.mimeType &&
-                file.mimeType.indexOf(
-                    "video/"
-                ) === 0
-            ) {
-                type = "video";
-            } else if (
-                file.mimeType &&
-                file.mimeType.indexOf(
-                    "image/"
-                ) === 0
-            ) {
-                type = "image";
-            }
-
-            /*
-             * Create material information
-             */
-            const material = {
-
-                id: id,
-
-                title: String(
-                    fields.title ||
-                    file.filename
-                ).trim(),
-
-                description: String(
-                    fields.description ||
-                    ""
-                ).trim(),
-
-                category: String(
-                    fields.category ||
-                    "Other"
-                ).trim(),
-
-                type: type,
-
-                originalName: file.filename,
-
-                mimeType: file.mimeType ||
-                    "application/octet-stream",
-
-                size: file.buffer.length,
-
-                blobKey: blobKey,
-
-                createdAt: new Date().toISOString()
-            };
-
-            /*
-             * Add material
-             */
-            materials.push(
-                material
-            );
-
-            /*
-             * Save updated list
-             */
-            await saveMaterials(
-                materials
-            );
-
-            return json(200, {
-                message: "Uploaded successfully.",
-
-                material: material
-            });
-        }
-
-        /*
-         * DELETE
-         *
-         * /api/:id
-         */
-        if (method === "DELETE") {
-
-            const auth =
-                checkPassword(event);
-
-            if (!auth.ok) {
-                return auth.response;
-            }
-
-            const materialId =
-                getMaterialId(event);
-
-            if (!materialId) {
-
-                return json(400, {
-                    error: "Material ID is required."
-                });
-            }
-
-            const materials =
-                await getMaterials();
-
-            const material =
-                materials.find(
-                    function(item) {
-                        return item.id === materialId;
-                    }
-                );
-
-            if (!material) {
-
-                return json(404, {
-                    error: "Material not found."
-                });
-            }
-
-            /*
-             * Delete uploaded file
-             */
-            if (material.blobKey) {
-
-                try {
-
-                    const store =
-                        getStudyStore();
-
-                    await store.delete(
-                        material.blobKey
-                    );
-
-                } catch (error) {
-
-                    console.error(
-                        "Blob deletion error:",
-                        error
-                    );
-                }
-            }
-
-            /*
-             * Remove from index
-             */
-            const updatedMaterials =
-                materials.filter(
-                    function(item) {
-                        return item.id !== materialId;
-                    }
-                );
-
-            await saveMaterials(
-                updatedMaterials
-            );
-
-            return json(200, {
-                message: "Deleted successfully."
-            });
-        }
-
-        /*
-         * Unsupported method
-         */
-        return json(405, {
-            error: "Method not allowed."
+        return json(200, {
+            success: true,
+            count: materials.length,
+            materials: materials
         });
-
     } catch (error) {
-
         console.error(
-            "StudyShare API error:",
+            "GET error:",
             error
         );
 
         return json(500, {
-            error: error && error.message ?
-                error.message : "Server error."
+            error: "Unable to load study materials.",
+
+            message: error.message
         });
     }
-};
+}
+
+// =====================================================
+// UPLOAD
+// =====================================================
+
+async function handleUpload(event) {
+    const auth =
+        checkPassword(event);
+
+    if (!auth.ok) {
+        return auth.response;
+    }
+
+    try {
+        const parsed =
+            await parseMultipart(
+                event
+            );
+
+        const fields =
+            parsed.fields;
+
+        const file =
+            parsed.file;
+
+        if (!file) {
+            return json(400, {
+                error: "No file was uploaded."
+            });
+        }
+
+        if (!file.buffer ||
+            file.buffer.length ===
+            0
+        ) {
+            return json(400, {
+                error: "Uploaded file is empty."
+            });
+        }
+
+        if (
+            file.buffer.length >
+            MAX_FILE_SIZE
+        ) {
+            return json(400, {
+                error: "File is larger than 5 MB."
+            });
+        }
+
+        const title =
+            String(
+                fields.title || ""
+            ).trim();
+
+        const description =
+            String(
+                fields.description ||
+                ""
+            ).trim();
+
+        const category =
+            String(
+                fields.category ||
+                "Other"
+            ).trim();
+
+        if (!title) {
+            return json(400, {
+                error: "Title is required."
+            });
+        }
+
+        const id =
+            createId();
+
+        const originalFileName =
+            file.filename ||
+            "study-material";
+
+        const cleanFileName =
+            safeFileName(
+                originalFileName
+            );
+
+        const extension =
+            getExtension(
+                cleanFileName
+            );
+
+        const blobKey =
+            "files/" +
+            id +
+            "-" +
+            cleanFileName;
+
+        // -------------------------------------------------
+        // SAVE FILE
+        // -------------------------------------------------
+
+        const store =
+            getStudyStore();
+
+        await store.set(
+            blobKey,
+            file.buffer, {
+                metadata: {
+                    contentType: file.mimeType ||
+                        "application/octet-stream"
+                }
+            }
+        );
+
+        // -------------------------------------------------
+        // MATERIAL RECORD
+        // -------------------------------------------------
+
+        const material = {
+            id: id,
+
+            title: title,
+
+            description: description,
+
+            category: category,
+
+            fileName: cleanFileName,
+
+            originalFileName: originalFileName,
+
+            fileSize: file.buffer.length,
+
+            fileSizeMB: Number(
+                (
+                    file.buffer.length /
+                    (1024 * 1024)
+                ).toFixed(2)
+            ),
+
+            mimeType: file.mimeType ||
+                "application/octet-stream",
+
+            extension: extension,
+
+            blobKey: blobKey,
+
+            createdAt: new Date().toISOString(),
+
+            updatedAt: new Date().toISOString()
+        };
+
+        // -------------------------------------------------
+        // SAVE INDEX
+        // -------------------------------------------------
+
+        const materials =
+            await readIndex();
+
+        materials.unshift(
+            material
+        );
+
+        await saveIndex(
+            materials
+        );
+
+        return json(201, {
+            success: true,
+
+            message: "Study material uploaded successfully.",
+
+            material: material
+        });
+    } catch (error) {
+        console.error(
+            "Upload error:",
+            error
+        );
+
+        return json(500, {
+            error: "Unable to upload study material.",
+
+            message: error.message
+        });
+    }
+}
+
+// =====================================================
+// DELETE
+// =====================================================
+
+async function handleDelete(event) {
+    const auth =
+        checkPassword(event);
+
+    if (!auth.ok) {
+        return auth.response;
+    }
+
+    try {
+        const query =
+            event.queryStringParameters || {};
+
+        let id =
+            query.id || "";
+
+        // -------------------------------------------------
+        // ALSO CHECK BODY
+        // -------------------------------------------------
+
+        if (!id &&
+            event.body
+        ) {
+            try {
+                let body =
+                    event.body;
+
+                if (
+                    event.isBase64Encoded
+                ) {
+                    body =
+                        Buffer.from(
+                            body,
+                            "base64"
+                        ).toString(
+                            "utf8"
+                        );
+                }
+
+                const parsed =
+                    JSON.parse(body);
+
+                if (parsed.id) {
+                    id =
+                        parsed.id;
+                }
+            } catch (error) {
+                console.log(
+                    "DELETE body was not JSON."
+                );
+            }
+        }
+
+        if (!id) {
+            return json(400, {
+                error: "Material ID is required."
+            });
+        }
+
+        const materials =
+            await readIndex();
+
+        let materialIndex = -1;
+
+        for (
+            let i = 0; i < materials.length; i++
+        ) {
+            if (
+                materials[i].id ===
+                id
+            ) {
+                materialIndex =
+                    i;
+
+                break;
+            }
+        }
+
+        if (
+            materialIndex ===
+            -1
+        ) {
+            return json(404, {
+                error: "Material not found."
+            });
+        }
+
+        const material =
+            materials[
+                materialIndex
+            ];
+
+        const store =
+            getStudyStore();
+
+        // -------------------------------------------------
+        // DELETE FILE
+        // -------------------------------------------------
+
+        if (
+            material.blobKey
+        ) {
+            try {
+                await store.delete(
+                    material.blobKey
+                );
+            } catch (error) {
+                console.error(
+                    "Blob deletion error:",
+                    error
+                );
+            }
+        }
+
+        // -------------------------------------------------
+        // DELETE INDEX RECORD
+        // -------------------------------------------------
+
+        materials.splice(
+            materialIndex,
+            1
+        );
+
+        await saveIndex(
+            materials
+        );
+
+        return json(200, {
+            success: true,
+
+            message: "Study material deleted successfully.",
+
+            deleted: material
+        });
+    } catch (error) {
+        console.error(
+            "Delete error:",
+            error
+        );
+
+        return json(500, {
+            error: "Unable to delete study material.",
+
+            message: error.message
+        });
+    }
+}
+
+// =====================================================
+// OPTIONS
+// =====================================================
+
+function handleOptions() {
+    return {
+        statusCode: 204,
+
+        headers: {
+            "Access-Control-Allow-Origin": "*",
+
+            "Access-Control-Allow-Headers": "Content-Type, X-Admin-Password",
+
+            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+
+            "Access-Control-Max-Age": "86400"
+        },
+
+        body: ""
+    };
+}
+
+// =====================================================
+// NETLIFY HANDLER
+// =====================================================
+
+exports.handler =
+    async function(event) {
+        try {
+            const method =
+                String(
+                    event.httpMethod ||
+                    "GET"
+                ).toUpperCase();
+
+            // OPTIONS
+            if (
+                method ===
+                "OPTIONS"
+            ) {
+                return handleOptions();
+            }
+
+            // GET
+            if (
+                method ===
+                "GET"
+            ) {
+                return await handleGet(
+                    event
+                );
+            }
+
+            // POST
+            if (
+                method ===
+                "POST"
+            ) {
+                return await handleUpload(
+                    event
+                );
+            }
+
+            // DELETE
+            if (
+                method ===
+                "DELETE"
+            ) {
+                return await handleDelete(
+                    event
+                );
+            }
+
+            // OTHER
+            return json(405, {
+                error: "Method not allowed."
+            });
+        } catch (error) {
+            console.error(
+                "StudyShare API error:",
+                error
+            );
+
+            return json(500, {
+                error: error.message ||
+                    "Server error."
+            });
+        }
+    };
